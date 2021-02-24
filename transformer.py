@@ -10,7 +10,7 @@ def get_angles(pos, i, d_model):
 
 def point_wise_feed_forward_network(d_model, dff):
   return tf.keras.Sequential([
-      tf.keras.layers.Dense(dff, activation='relu'),  # (batch_size, seq_len, dff)
+      tf.keras.layers.Dense(dff, activation='swish'),  # (batch_size, seq_len, dff)
       tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model)
   ])
 
@@ -243,9 +243,11 @@ class Decoder(tf.keras.layers.Layer):
     return x, attention_weights
 
 class Transformer(tf.keras.Model):
-  def __init__(self, num_layers, d_model, num_heads, dff, input_vocab_size, 
-               target_vocab_size, pe_input, pe_target, rate=0.1):
+  def __init__(self, num_layers, d_model, num_heads, dff,
+               pe_input, pe_target, rate=0.1):
     super(Transformer, self).__init__()
+
+    input_vocab_size, target_vocab_size = 1, 3
 
     self.encoder = Encoder(num_layers, d_model, num_heads, dff, 
                            input_vocab_size, pe_input, rate)
@@ -265,6 +267,7 @@ class Transformer(tf.keras.Model):
         tar, enc_output, training, look_ahead_mask, dec_padding_mask)
 
     final_output = self.final_layer(dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
+    final_output = tf.concat([final_output[:,:,0:1], tf.nn.sigmoid(final_output[:,:,1:])], axis=-1)
 
     return final_output#, attention_weights
 

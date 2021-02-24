@@ -13,8 +13,8 @@ from random import randrange, sample
 FEATURES = ["Open", "High", "Low", "Close", "Volume"]
 
 BATCH_SIZE = 256
-SEQUENCE_LENGTH = 50
 WINDOW_SIZE = 100
+SEQUENCE_LENGTH = WINDOW_SIZE // 2
 MOMENTUM_WINDOW_SIZE = 25
 
 EPOCHS = 20
@@ -36,9 +36,12 @@ for f in tqdm(all_stocks):
 stock_array = np.array(stock_array)[:,:,:-1]
 stock_array[:,:,-1] /= 1e6
 
-moving_averages = np.array([np.array([np.array(pd.Series(stock_array[x,:,i]).rolling(window=SEQUENCE_LENGTH).mean().fillna(0)) for x in range(stock_array.shape[0])]) for i in range(5)])
+label_array = stock_array[:,:,3:4]
+stock_array = np.concatenate([stock_array[:,:,:3], stock_array[:,:,4:]], axis=-1)
+
+moving_averages = np.array([np.array([np.array(pd.Series(stock_array[x,:,i]).rolling(window=SEQUENCE_LENGTH).mean().fillna(0)) for x in range(stock_array.shape[0])]) for i in range(4)])
 moving_averages = np.transpose(moving_averages, (1, 2, 0))
-moving_stds = np.array([np.array([np.array(pd.Series(stock_array[x,:,i]).rolling(window=SEQUENCE_LENGTH).std().fillna(0)) for x in range(stock_array.shape[0])]) for i in range(5)])
+moving_stds = np.array([np.array([np.array(pd.Series(stock_array[x,:,i]).rolling(window=SEQUENCE_LENGTH).std().fillna(0)) for x in range(stock_array.shape[0])]) for i in range(4)])
 moving_stds = np.transpose(moving_stds, (1, 2, 0))
 
 moving_volatilities = moving_stds * np.sqrt(np.reshape(np.arange(moving_stds.shape[1])+1, (1, moving_stds.shape[1], 1)))
@@ -52,7 +55,7 @@ momentums[:,:MOMENTUM_WINDOW_SIZE] = np.zeros(())
 rates_of_change = np.divide(momentums, delayed_stocks, where=delayed_stocks>0)
 rates_of_change[np.abs(rates_of_change) < 1e-6] = np.zeros(())
 
-cum_averages = [np.cumsum(stock_array[:,:,i], axis=1) / (np.arange(stock_array.shape[1])+1) for i in range(5)]
+cum_averages = [np.cumsum(stock_array[:,:,i], axis=1) / (np.arange(stock_array.shape[1])+1) for i in range(4)]
 cum_averages = [np.expand_dims(x, axis=-1) for x in cum_averages]
 
 stock_array = np.concatenate([stock_array,
@@ -62,29 +65,40 @@ stock_array = np.concatenate([stock_array,
                               momentums,
                               rates_of_change]+cum_averages, axis=-1)
 
-FEATURE_COUNT = stock_array.shape[-1]
+FEATURE_COUNT = stock_array.shape[-1]+1
+print(f"Feature count: {FEATURE_COUNT}")
 STEPS_PER_EPOCH = stock_array.shape[0]
 
-def generate_dataset(train_stock_array, validation_stock_array, train_steps, validation_steps):
+def generate_dataset(train_stock_arrays, validation_stock_arrays, train_steps, validation_steps):
     def train_generator():
-        for i in range(train_steps):
-            stock_index = randrange(train_stock_array.shape[0])
-            start_index = randrange(train_stock_array.shape[1]-SEQUENCE_LENGTH)
+        for i in range(train_stock_arrays[0].shape[0]):
+            stock_index = i
+            #start_index = randrange(train_stock_arrays[0].shape[1]-SEQUENCE_LENGTH)
 
-            array = train_stock_array[stock_index,start_index:start_index+SEQUENCE_LENGTH]
-            array[:,3] /= np.max(array[:,3])
+            array = train_stock_arrays[0][stock_index,:SEQUENCE_LENGTH]#,start_index:start_index+SEQUENCE_LENGTH]
+            #array[:,3] /= np.max(array[:,3])
 
-            yield array, array[:,3:4]
+            all_close = train_stock_arrays[1][stock_index]
+            label_array = all_close[SEQUENCE_LENGTH:]#,start_index:start_index+SEQUENCE_LENGTH]
+
+            array = np.concatenate([array, all_close[:SEQUENCE_LENGTH]], axis=-1)
+
+            yield array, label_array
 
     def validation_generator():
-        for i in range(validation_steps):
-            stock_index = randrange(validation_stock_array.shape[0])
-            start_index = randrange(validation_stock_array.shape[1]-SEQUENCE_LENGTH)
+        for i in range(validation_stock_arrays[0].shape[0]):
+            stock_index = i
+            #start_index = randrange(validation_stock_arrays[0].shape[1]-SEQUENCE_LENGTH)
 
-            array = validation_stock_array[stock_index,start_index:start_index+SEQUENCE_LENGTH]
-            array[:,3] /= np.max(array[:,3])
+            array = validation_stock_arrays[0][stock_index,:SEQUENCE_LENGTH]#,start_index:start_index+SEQUENCE_LENGTH]
+            #array[:,3] /= np.max(array[:,3])
 
-            yield array, array[:,3:4]
+            all_close = validation_stock_arrays[1][stock_index]
+            label_array = all_close[SEQUENCE_LENGTH:]#,start_index:start_index+SEQUENCE_LENGTH]
+
+            array = np.concatenate([array, all_close[:SEQUENCE_LENGTH]], axis=-1)
+
+            yield array, label_array
 
     train_dataset = tf.data.Dataset.from_generator(train_generator, output_types=(tf.float32, tf.float32))
     train_dataset = train_dataset.batch(BATCH_SIZE).repeat()
@@ -99,9 +113,11 @@ VALIDATION_SIZE = int(stock_array.shape[0] * VALIDATION_RATIO)
 validation_indices = sample(range(stock_array.shape[0]), VALIDATION_SIZE)
 train_indices = [x for x in range(stock_array.shape[0]) if x not in validation_indices]
 
-train_dataset, validation_dataset = generate_dataset(stock_array[train_indices], stock_array[validation_indices], STEPS_PER_EPOCH*BATCH_SIZE, VALIDATION_SIZE)
+train_dataset, validation_dataset = generate_dataset((stock_array[train_indices], label_array[train_indices]),
+                                                     (stock_array[validation_indices], label_array[validation_indices]),
+                                                     STEPS_PER_EPOCH*BATCH_SIZE, VALIDATION_SIZE)
 
-model = Transformer(2, 256, 8, 128, 1, 1, 10000, 10000)
+model = Transformer(2, 512, 8, 256, 10000, 10000)
 
 model(tf.random.uniform((BATCH_SIZE, SEQUENCE_LENGTH, FEATURE_COUNT)),
       tf.random.uniform((BATCH_SIZE, SEQUENCE_LENGTH, 1)), False, None, None, None)
@@ -112,10 +128,38 @@ opt = keras.optimizers.Adam()
 lf = keras.losses.MSE
 #loss_function = lambda y, x: tf.nn.compute_average_loss(tf.math.sqrt(lf(y, x)))
 #loss_function = lambda y, x: tf.nn.compute_average_loss(keras.losses.MSE(y, x))
-def loss_function(target, logits):
-    delta_squared = 1 / (BATCH_SIZE-1) * tf.math.reduce_sum(tf.math.square(target - tf.math.reduce_mean(target)))
 
-    loss = 1 / (delta_squared*BATCH_SIZE) * tf.math.reduce_sum(tf.math.square(target - logits))
+def nmse(target, logits):
+    delta_squared = tf.math.reduce_mean(tf.math.square(target - tf.math.reduce_mean(target)))
+    loss = (1 / delta_squared) * tf.math.reduce_mean(tf.math.square(target - logits))
+
+    return loss
+
+def loss_function(target, logits):
+    smoothing = 0.1
+
+    regression_pred = logits[:,:,0:1]
+    regression_loss = nmse(target, regression_pred)
+ 
+    target_off = tf.concat([tf.zeros((target.shape[0], 1, target.shape[-1])), target[:,:-1]], axis=1)
+    regression_off = tf.concat([tf.zeros((logits.shape[0], 1, regression_pred.shape[-1])), regression_pred[:,:-1]], axis=1)
+
+    target_diff = (target - target_off)[:,1:]
+    regression_diff = (regression_pred - regression_off)[:,1:]
+
+    diffs_loss = nmse(target_diff, regression_diff)
+
+    #up_pred = logits[:,1:,1:2]
+    #down_pred = logits[:,1:,2:]
+    up_label = tf.cast(target_diff > 0, tf.float32)
+    down_label = tf.cast(target_diff < 0, tf.float32)
+
+    #up_loss = keras.losses.binary_crossentropy(up_label, tf.clip_by_value(regression_diff, 0+smoothing, 1-smoothing), label_smoothing=smoothing)
+    #up_loss = tf.math.reduce_sum(up_loss) / tf.math.reduce_sum(up_label)
+    #down_loss = keras.losses.binary_crossentropy(down_label, tf.clip_by_value(regression_diff, smoothing-1, smoothing-0), label_smoothing=smoothing)
+    #down_loss = tf.math.reduce_sum(down_loss) / tf.math.reduce_sum(down_label)
+
+    loss = regression_loss + diffs_loss# + up_loss + down_loss
 
     return loss
 
@@ -155,7 +199,7 @@ def eval_step(input_tensor, target):
 
     loss = loss_function(target, logits)
 
-    return loss#, logits
+    return loss, logits
 
 steps_per_epoch = STEPS_PER_EPOCH
 learning_rate_base = 1e-3
@@ -196,7 +240,103 @@ class LRSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 
 schedule = LRSchedule()
 
+# TODO: comment on what these are
+class NMSE(keras.metrics.Metric):
+    def __init__(self):
+        super().__init__()
+
+        self.met = keras.metrics.Mean()
+
+    def update_state(self, target, logits, sample_weight=None):
+        output = nmse(target, logits)
+
+        self.met.update_state(output)
+
+    def reset_states(self):
+        self.met.reset_states()
+
+    def result(self):
+        return self.met.result()
+
+class DirectionalSymmetry(keras.metrics.Metric):
+    def __init__(self):
+        super().__init__()
+
+        self.met = keras.metrics.Mean()
+
+    def update_state(self, target, logits, sample_weight=None):
+        target_off = tf.concat([tf.zeros((target.shape[0], 1, target.shape[-1])), target[:,:-1]], axis=1)
+        logits_off = tf.concat([tf.zeros((logits.shape[0], 1, logits.shape[-1])), logits[:,:-1]], axis=1)
+
+        target_diff = (target - target_off)[:,1:]
+        logits_diff = (logits - logits_off)[:,1:]
+
+        output = tf.cast((target_diff * logits_diff) >= 0, tf.float32)
+        output = tf.math.reduce_mean(output)
+
+        self.met.update_state(output)
+
+    def reset_states(self):
+        self.met.reset_states()
+
+    def result(self):
+        return self.met.result()
+
+class CorrectUp(keras.metrics.Metric):
+    def __init__(self):
+        super().__init__()
+
+        self.met = keras.metrics.Mean()
+
+    def update_state(self, target, logits, sample_weight=None):
+        target_off = tf.concat([tf.zeros((target.shape[0], 1, target.shape[-1])), target[:,:-1]], axis=1)
+        logits_off = tf.concat([tf.zeros((logits.shape[0], 1, logits.shape[-1])), logits[:,:-1]], axis=1)
+
+        target_diff = (target - target_off)[:,1:]
+        logits_diff = (logits - logits_off)[:,1:]
+
+        output = tf.math.logical_and(logits_diff > 0, (target_diff * logits_diff) >= 0)
+        output = tf.math.reduce_mean(tf.cast(output, tf.float32))
+
+        self.met.update_state(output)
+
+    def reset_states(self):
+        self.met.reset_states()
+
+    def result(self):
+        return self.met.result()
+
+class CorrectDown(keras.metrics.Metric):
+    def __init__(self):
+        super().__init__()
+
+        self.met = keras.metrics.Mean()
+
+    def update_state(self, target, logits, sample_weight=None):
+        target_off = tf.concat([tf.zeros((target.shape[0], 1, target.shape[-1])), target[:,:-1]], axis=1)
+        logits_off = tf.concat([tf.zeros((logits.shape[0], 1, logits.shape[-1])), logits[:,:-1]], axis=1)
+
+        target_diff = (target - target_off)[:,1:]
+        logits_diff = (logits - logits_off)[:,1:]
+
+        output = tf.math.logical_and(logits_diff < 0, (target_diff * logits_diff) >= 0)
+        output = tf.math.reduce_mean(tf.cast(output, tf.float32))
+
+        self.met.update_state(output)
+
+    def reset_states(self):
+        self.met.reset_states()
+
+    def result(self):
+        return self.met.result()
+
 #tf.debugging.enable_check_numerics()
+
+metrics = { "mae": keras.metrics.MeanAbsoluteError(),
+            "nmse": NMSE(),
+            "directional_symmetry": DirectionalSymmetry(),
+            "correct_up": CorrectUp(),
+            "correct_down": CorrectDown() }
 
 loss_met = keras.metrics.Mean()
 it = iter(train_dataset)
@@ -208,16 +348,37 @@ for e in range(EPOCHS):
         inp, tar = next(it)
 
         loss, logits = train_step(inp, tar)
+        regression_pred = logits[:,:,:1]
         loss_met(loss)
 
-        bar.set_description(f"loss: {loss_met.result():0.5f}")
+        results = dict()
+        for key, metric in metrics.items():
+            metric.update_state(tar, regression_pred)
+            results[key] = metric.result().numpy()
+
+        bar.set_description(f"loss: {loss_met.result():.4f}, "+", ".join([key+": "+f"{result:.4f}" for key, result in results.items()]))
 
         opt.learning_rate.assign(cosine_decay_with_warmup(e*STEPS_PER_EPOCH+i))
 
+    val_metrics = { "mae": keras.metrics.MeanAbsoluteError(),
+                    "nmse": NMSE(),
+                    "directional_symmetry": DirectionalSymmetry(),
+                    "correct_up": CorrectUp(),
+                    "correct_down": CorrectDown() }
+
     val_loss_met = keras.metrics.Mean()
     for vi, vt in validation_dataset:
-        val_loss_met(eval_step(vi, vt))
+        loss, logits = eval_step(vi, vt)
+        regression_pred = logits[:,:,:1]
 
-    print(f"Train loss: {loss_met.result()}, validation loss: {val_loss_met.result()}")
+        val_loss_met(loss)
+        for key, metric in val_metrics.items():
+            metric.update_state(vt, regression_pred)
+
+    print(f"train_loss: {loss_met.result():.4f}, val_loss: {val_loss_met.result():.4f}, ", end='')
+    print(", ".join([key+": "+f"{metric.result():.4f}" for key, metric in val_metrics.items()]))
+
+    for _, metric in metrics.items():
+        metric.reset_states()
 
     loss_met.reset_states()
