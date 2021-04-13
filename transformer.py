@@ -244,30 +244,41 @@ class Decoder(tf.keras.layers.Layer):
 
 class Transformer(tf.keras.Model):
   def __init__(self, num_layers, d_model, num_heads, dff,
-               pe_input, pe_target, rate=0.1):
+               pe_input=10000, pe_target=10000, rate=0.1):
     super(Transformer, self).__init__()
 
     input_vocab_size, target_vocab_size = 1, 3
 
-    self.encoder = Encoder(num_layers, d_model, num_heads, dff, 
-                           input_vocab_size, pe_input, rate)
+    self.regression_encoder = Encoder(num_layers, d_model, num_heads, dff, 
+                                      input_vocab_size, pe_input, rate)
+
+    self.classification_encoder = Encoder(num_layers, d_model, num_heads, dff, 
+                                          input_vocab_size, pe_input, rate)
+
 
     self.decoder = Decoder(num_layers, d_model, num_heads, dff, 
                            target_vocab_size, pe_target, rate)
 
-    self.final_layer = tf.keras.layers.Dense(target_vocab_size)
+    self.direction_pred = tf.keras.layers.Dense(target_vocab_size-1, activation='sigmoid', name='direction_prediction')
+    self.final_layer = tf.keras.layers.Dense(1, name='regression_prediction')
 
   def call(self, inp, tar, training, enc_padding_mask, 
            look_ahead_mask, dec_padding_mask):
 
-    enc_output = self.encoder(inp, training, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
+    reg_input = inp[...,:-5]
+    class_input = inp[...,-5:]
+
+    reg_enc_output = self.regression_encoder(reg_input, training, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
+    class_enc_output = self.classification_encoder(class_input, training, enc_padding_mask)
+
+    enc_output = tf.concat([reg_enc_output, class_enc_output], axis=-1)
 
     # dec_output.shape == (batch_size, tar_seq_len, d_model)
     dec_output, attention_weights = self.decoder(
         tar, enc_output, training, look_ahead_mask, dec_padding_mask)
 
-    final_output = self.final_layer(dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
-    final_output = tf.concat([final_output[:,:,0:1], tf.nn.sigmoid(final_output[:,:,1:])], axis=-1)
+    direction_prediction = self.direction_pred(dec_output)
+    final_output = self.final_layer(tf.concat([direction_prediction, dec_output], axis=-1))  # (batch_size, tar_seq_len, target_vocab_size)
+    #final_output = tf.concat([final_output[:,:,0:1], tf.nn.sigmoid(final_output[:,:,1:])], axis=-1)
 
-    return final_output#, attention_weights
-
+    return direction_prediction, final_output#, attention_weights
